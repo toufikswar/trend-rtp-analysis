@@ -1,0 +1,168 @@
+---
+title: "Trend Real Time Protection Analysis"
+output: html_notebook
+---
+
+<br>
+
+# Objective
+The aim of the study is to identify devices that have the RTP deactivated within a period of time. We noticied that RTP gets deactivated randomly for a set of devices, and that might be due to conflicts with other Antiviruses.
+
+The idea of this analysis is to identify devices with RTP OFF, and see if conflicts exists between different Antiviruses.
+
+
+
+<br><br>
+
+# Loading data
+
+We get data from a powershell remote action running on each device and returning the Antivirus status for each of them.
+
+A script is scheduled on a server that will gather all this data and consolidate it in a CSV file. This script is scheduled to run every 30 min.
+
+After that, CSV files are dropped to a shared folder where we take it from for the analysis.
+
+<br>
+
+## Libraries
+```{r echo=T,eval=T,warning=FALSE, message=FALSE}
+library("tidyverse")
+library("lubridate")
+library("formattable")
+library("magrittr")
+```
+
+<br> 
+
+## Consolidate all CSVs
+We create an empty tibble that we will fill with all data gathered from the CSV folder. We take the executiond date from the file names via a regex.
+```{r echo=T,eval=F,warning=FALSE, message=FALSE}
+empty <- tibble(
+  a = character(),
+  b = character(),
+  c = double()
+)
+
+myFiles <- list.files("./data/")
+
+
+for(filename in myFiles){
+
+  temp <- read_delim(paste0("./data/",filename), delim = "\t")
+
+  
+  temp$day <- filename %>%
+    str_extract("[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}h[0-9]{2}") %>%
+    str_replace("_", " ") %>%
+    str_replace("h", ":") %>%
+    paste("00", sep = ":") %>%
+    ymd_hms()
+  
+  
+  empty <- rbind(empty, temp)
+  
+}
+```
+
+<br>
+
+## Create consolidation table
+
+
+```{r echo=T,eval=F,warning=FALSE, message=FALSE}
+empty %>%
+  na.omit() %>%
+  mutate(trend_rtp_off = ifelse(grepl("Trend Micro OfficeScan Antivirus (RTP: off", all_antiviruses, fixed = T) & !grepl("Trend Micro OfficeScan Antivirus (RTP: on", all_antiviruses, fixed = T) , TRUE, FALSE),
+         trend_rtp_on = ifelse(grepl("Trend Micro OfficeScan Antivirus (RTP: on", all_antiviruses, fixed = T), TRUE, FALSE),
+         cylance_rtp_off = ifelse(grepl("CylancePROTECT (RTP: off", all_antiviruses, fixed = T), TRUE, FALSE),
+         cylance_rtp_on = ifelse(grepl("CylancePROTECT (RTP: on", all_antiviruses, fixed = T), TRUE, FALSE),
+         avast_rtp_off = ifelse(grepl("Avast Antivirus (RTP: off", all_antiviruses, fixed = T), TRUE, FALSE),
+         avast_rtp_on = ifelse(grepl("Avast Antivirus (RTP: on", all_antiviruses, fixed = T), TRUE, FALSE),
+         malwarebyte_rtp_off = ifelse(grepl("Avast Antivirus (RTP: off", all_antiviruses, fixed = T), TRUE, FALSE),
+         malwarebyte_rtp_on = ifelse(grepl("Avast Antivirus (RTP: on", all_antiviruses, fixed = T), TRUE, FALSE),
+         win_def_rtp_off = ifelse(grepl("Windows Defender Antivirus (RTP: off", all_antiviruses, fixed = T) | grepl("Windows Defender (RTP: off", all_antiviruses, fixed = T) , TRUE, FALSE),
+         win_def_rtp_on = ifelse(grepl("Windows Defender Antivirus (RTP: on", all_antiviruses, fixed = T) | grepl("Windows Defender (RTP: on", all_antiviruses, fixed = T) , TRUE, FALSE),
+         last_seen_from_execution = round(difftime(day,last_seen, units = "days"),0)) %>%
+  arrange(-last_seen_from_execution) %>%
+  filter(last_seen_from_execution <= 15) %>%
+  select(name, day, trend_rtp_off, trend_rtp_on, cylance_rtp_off, cylance_rtp_on, avast_rtp_off, avast_rtp_on, malwarebyte_rtp_off, malwarebyte_rtp_on, win_def_rtp_off ,win_def_rtp_on) %>%
+  inner_join(appearing, by = c("name" = "name")) %>% 
+  group_by(name, appear) %>%
+  mutate(trend_on = sum(trend_rtp_on),
+         trend_off = sum(trend_rtp_off),
+         cylance_on = sum(cylance_rtp_on),
+         cylance_off = sum(cylance_rtp_off),
+         avast_on = sum(avast_rtp_on),
+         avast_off = sum(avast_rtp_off),
+         malwarebyte_on = sum(malwarebyte_rtp_on),
+         malwarebyte_off = sum(malwarebyte_rtp_off),
+         win_def_on = sum(win_def_rtp_on),
+         win_def_off = sum(win_def_rtp_off)) %>%
+  ungroup() %>%
+  group_by(name, appear) %>%
+  summarise(pct_trend_on = round(max(trend_on/appear)*100,0),
+            pct_trend_off = round(max(trend_off/appear)*100,0),
+            pct_cylance_on = round(max(cylance_on/appear)*100,0),
+            pct_cylance_off = round(max(cylance_off/appear)*100,0),
+            pct_avast_on = round(max(avast_on/appear)*100,0),
+            pct_avast_off = round(max(avast_off/appear)*100,0),
+            pct_malwarebyte_on = round(max(malwarebyte_on/appear)*100,0),
+            pct_malwarebyte_off = round(max(malwarebyte_off/appear)*100,0),
+            pct_win_def_on = round(max(win_def_on/appear)*100,0),
+            pct_win_def_off = round(max(win_def_off/appear)*100,0)) %T>%
+  write_excel_csv("all_antiviruses_ON_OFF.csv")
+```
+
+<br>
+
+## Load consolidated data and join 
+We load the file saved previoulsy (to avoid to recalculate everthing again), and inner join device names with another table (table containing all devices and RA RTP status)
+
+
+```{r echo=T,eval=F,warning=FALSE, message=FALSE}
+
+df <- read_csv("./all_antiviruses_ON_OFF.csv")
+df.all <- read_delim("./all.csv", delim = "\t")
+
+
+```
+
+<br>
+
+## Summary table
+
+```{r echo=T,eval=T,warning=FALSE, message=FALSE}
+
+## Function needed to create the above table
+funk <- function(x){
+  if( x >= 0 & x <10){ return("0-10") }
+  if( x >= 10 & x <20){ return("10-20") }
+  if( x >= 20 & x <30){ return("20-30") }
+  if( x >= 30 & x <40){ return("30-40") }
+  if( x >= 40 & x <50){ return("40-50") }
+  if( x >= 50 & x <60){ return("50-60") }
+  if( x >= 60 & x <70){ return("60-70") }
+  if( x >= 70 & x <80){ return("70-80") }
+  if( x >= 80 & x <90){ return("80-90") }
+  if( x >= 90){ return("90-100") }
+}
+
+df %>%
+  mutate(trend = sapply(.$pct_trend_on, funk),
+         cylance = sapply(.$pct_cylance_on, funk),
+         avast = sapply(.$pct_avast_on, funk),
+         malware = sapply(.$pct_malwarebyte_on, funk),
+         windef = sapply(.$pct_win_def_on, funk)) %>%
+  select(name, trend, cylance, malware, windef) %>%
+  gather(trend, cylance, malware, windef, key=antivirus, value=number) %>%
+  group_by(number, antivirus) %>%
+  summarise(countn = n()) %>%
+  spread(antivirus, countn) %>%
+  replace(is.na(.), 0) %>%
+  rename(`% of time RTP is ON` = number, `# of devices Cylance` = cylance, `# of devices MalwareByte` = malware,
+         `# of devices Trend` = trend, `# of devices Windows Defender` = windef) %>%
+  formattable()
+
+```
+
+  

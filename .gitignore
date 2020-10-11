@@ -1,0 +1,9 @@
+.DS_Store
+*.Rproj
+.Rproj.user/
+
+# Ignore Data files
+*.csv
+*.xls
+*.xlsx
+*.zip
